@@ -1,5 +1,5 @@
-// Package germ contains the core logic for the germ tool
-package germ
+// Package codectx contains the core logic for the codectx tool
+package codectx
 
 import (
 	"errors"
@@ -15,7 +15,7 @@ import (
 	_ "embed"
 
 	// Import the grep-ast library
-	queries "github.com/cyber-nic/germ/queries"
+	queries "github.com/codectx/ctx/queries"
 	goignore "github.com/cyber-nic/go-gitignore"
 	grepast "github.com/cyber-nic/grep-ast"
 	sitter "github.com/tree-sitter/go-tree-sitter"

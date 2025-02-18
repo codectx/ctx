@@ -1,5 +1,5 @@
-// Package germ contains the core logic for the germ tool
-package germ
+// Package codectx contains the core logic for the ctx tool
+package codectx
 
 func uniqueElements(slices ...[]string) []string {
 	uniqueMap := make(map[string]struct{})

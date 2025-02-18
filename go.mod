@@ -1,4 +1,4 @@
-module github.com/cyber-nic/germ
+module github.com/codectx/ctx
 
 go 1.23.4
 

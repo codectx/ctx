@@ -1,9 +1,9 @@
-# Graph Entity Repo Map (germ)
+# CodeCTX (ctx)
 
 _A Go library for building repository code maps using AST/CST. Particularly usefuel with AI-powered coding assistants._
 
 <p align="center">
-  <img height="256" src="./germ.svg">
+  <img height="256" src="./ctx.svg">
 </p>
 
 > [!CAUTION]
@@ -11,7 +11,12 @@ _A Go library for building repository code maps using AST/CST. Particularly usef
 
 ## Overview
 
-**Germ** (Graph Entity Repo Map) is a Go library designed to analyze and map code repositories by leveraging **Abstract Syntax Trees (AST)** and **Concrete Syntax Trees (CST)**. It enables AI-powered tools to understand code structures, dependencies, and relationships efficiently.
+**CTX** (CTX) is a Go library designed to analyze and map code repositories by leveraging **Concrete Syntax Trees (CST)** (often referred to as **Abstract Syntax Trees (AST)**). It enables AI-powered tools to understand code structures, dependencies, and relationships efficiently.
+
+CTX provides two distinct mechanisms for obtaining relevant repo code:
+
+1. A compelete "snapshot" of the current repo which includes the file tree structure and the important code definitions. Much credit goes to by [Aider-AI/aider](https://github.com/Aider-AI/aider).
+2. A chunk embedding search capabtility. Much credit goes to [sweepai/sweep](https://github.com/sweepai/sweep).
 
 ## Features
 
@@ -24,7 +29,7 @@ _A Go library for building repository code maps using AST/CST. Particularly usef
 ## Installation
 
 ```sh
-go get github.com/cyber-nic/germ
+go get github.com/codectx/ctx
 ```
 
 ## Usage
@@ -36,6 +41,11 @@ Use a .gitignore or create a git-compatible .astignore. Alternatily copy the .as
 ### Example
 
 See `cmd/main.go` for a working example.
+
+# Outstanding Items
+
+- cst caching
+- "chat files" to increase weight
 
 ## License
 

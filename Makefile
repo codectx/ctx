@@ -6,10 +6,10 @@ test:
 	# go test -v -run TestGetRelFname 
 
 build:
-	go build -o germ cmd/main.go
+	go build -o ctx cmd/main.go
 
 demo:
-	go run cmd/main.go > germ.map
+	go run cmd/main.go > ctx.map
 
 aider:
 	rm -rf ./.aider.tags.cache.v3

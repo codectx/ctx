@@ -5,10 +5,9 @@ import (
 	"os"
 	"path/filepath"
 
+	codectx "github.com/codectx/ctx"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-
-	"github.com/cyber-nic/germ"
 )
 
 func main() {
@@ -33,19 +32,16 @@ func main() {
 	}
 
 	// 2. Find the root of the git repo
-	root, err := germ.FindGitRoot(absPath)
+	root, err := codectx.FindGitRoot(absPath)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Error finding .git")
 	}
 
 	// 3. Build the RepoMap
-	//    Make sure you have imported and can reference your repomap code. For example:
-	//    import "github.com/yourname/yourrepo/repomap"
-	//    or if it's in the same module, something like "myproject/repomap"
-	rm := germ.NewRepoMap(
-		root,              // pass the discovered root
-		&germ.ModelStub{}, // or your real model
-		germ.WithLogLevel(int(zerolog.DebugLevel)),
+	rm := codectx.NewRepoMap(
+		root,                 // pass the discovered root
+		&codectx.ModelStub{}, // or your real model
+		codectx.WithLogLevel(int(zerolog.DebugLevel)),
 	)
 
 	// 4. Decide which files are "chat files" vs. "other files"
@@ -85,19 +81,19 @@ func main() {
 	mentionedFnames := map[string]bool{}
 	mentionedIdents := map[string]bool{}
 
-	repoMapOutput := rm.Generate(
+	codeMap := rm.Generate(
 		allFiles,
 		otherFiles,
 		mentionedFnames,
 		mentionedIdents,
 	)
 
-	if repoMapOutput == "" {
-		fmt.Println("Empty Repo Map")
+	if codeMap == "" {
+		fmt.Println("Empty Code Map")
 		return
 	}
 
-	fmt.Println(repoMapOutput)
+	fmt.Println(codeMap)
 }
 
 // ConfigLogging configures the logging level and format
@@ -118,8 +114,8 @@ func ConfigLogging(trace, debug *bool) {
 		return
 	}
 
-	// add GERM_LOG env variable to set log level
-	if logLevel, ok := os.LookupEnv("GERM_LOG"); ok {
+	// add CTX_LOG env variable to set log level
+	if logLevel, ok := os.LookupEnv("CTX_LOG"); ok {
 		switch logLevel {
 		case "debug":
 			zerolog.SetGlobalLevel(zerolog.DebugLevel)
