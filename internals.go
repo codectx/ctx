@@ -1,6 +1,11 @@
 // Package codectx contains the core logic for the ctx tool
 package codectx
 
+import (
+	"crypto/md5"
+	"encoding/hex"
+)
+
 func uniqueElements(slices ...[]string) []string {
 	uniqueMap := make(map[string]struct{})
 	result := []string{}
@@ -124,4 +129,11 @@ var commonWords = map[string]struct{}{
 	"copy": {}, "move": {}, "swap": {}, "sort": {}, "filter": {}, "replace": {},
 	"include": {}, "exclude": {}, "merge": {}, "diff": {}, "patch": {}, "apply": {},
 	"trace": {},
+}
+
+// computeHash returns the MD5 hash of the given data
+func computeHash(data []byte) string {
+	hasher := md5.New()
+	hasher.Write(data)
+	return hex.EncodeToString(hasher.Sum(nil))
 }

@@ -10,16 +10,16 @@ import (
 	sitter_go "github.com/tree-sitter/tree-sitter-go/bindings/go"
 )
 
-// TestNewRepoMap tests the NewRepoMap function.
-func TestNewRepoMap(t *testing.T) {
-	rm := NewRepoMap(".", &ModelStub{})
+// TestNewRepoCTX tests the NewRepoCTX function.
+func TestNewRepoCTX(t *testing.T) {
+	rm := NewRepoCTX(".", &ModelStub{}, nil)
 	if rm == nil {
-		t.Fatalf("Expected NewRepoMap to return a non-nil RepoMap")
+		t.Fatalf("Expected NewRepoCTX to return a non-nil RepoCTX")
 	}
 }
 
-// TestGetRelFname tests the GetRelFname method of the RepoMap struct.
-func TestGetRelFname(t *testing.T) {
+// TestGetRelFilename tests the GetRelFilename method of the RepoCTX struct.
+func TestGetRelFilename(t *testing.T) {
 	// Test cases
 	tests := []struct {
 		name     string
@@ -68,11 +68,11 @@ func TestGetRelFname(t *testing.T) {
 	// Run test cases
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			repo := RepoMap{root: tt.root}
-			result := repo.GetRelFname(tt.fname)
+			repo := RepoCTX{root: tt.root}
+			result := repo.GetRelFilename(tt.fname)
 
 			if result != tt.expected {
-				t.Errorf("GetRelFname(%q) = %q; want %q", tt.fname, result, tt.expected)
+				t.Errorf("GetRelFilename(%q) = %q; want %q", tt.fname, result, tt.expected)
 			}
 		})
 	}
@@ -100,8 +100,15 @@ func TestGetTagsFromQueryCapture(t *testing.T) {
 			t.Fatalf("Failed to create an empty query: %v", err)
 		}
 
+		f := &FileCTX{
+			Filename:    "some/path.go",
+			RelFilename: "rel/path.go",
+			SourceCode:  sourceCode,
+			Tree:        tree,
+		}
+
 		// Invoke the function under test
-		tags := GetTagsFromQueryCapture("rel/path.go", "/absolute/path.go", q, tree, sourceCode, nil)
+		tags := GetTagsFromQueryCapture(f, q, nil)
 
 		// We expect no tags
 		assert.Empty(t, tags, "Expected no tags for empty source code")
@@ -133,8 +140,15 @@ func TestGetTagsFromQueryCapture(t *testing.T) {
 			t.Fatalf("Failed to create query: %v", err)
 		}
 
+		f := &FileCTX{
+			Filename:    "some/path.go",
+			RelFilename: "rel/path.go",
+			SourceCode:  sourceCode,
+			Tree:        tree,
+		}
+
 		// Call the function we want to test
-		tags := GetTagsFromQueryCapture("rel/path.go", "/absolute/path.go", q, tree, sourceCode, nil)
+		tags := GetTagsFromQueryCapture(f, q, nil)
 
 		// Example: we expect exactly one definition. Adjust to reality once
 		// your parser/query code is set up.
@@ -180,8 +194,15 @@ func TestGetTagsFromQueryCapture(t *testing.T) {
 			t.Fatalf("Failed to create query: %v", err)
 		}
 
+		f := &FileCTX{
+			Filename:    "some/path.go",
+			RelFilename: "rel/path.go",
+			SourceCode:  sourceCode,
+			Tree:        tree,
+		}
+
 		// Invoke the function
-		tags := GetTagsFromQueryCapture("rel/path.go", "/absolute/path.go", q, tree, sourceCode, nil)
+		tags := GetTagsFromQueryCapture(f, q, nil)
 
 		assert.Len(t, tags, 2, "Expected exactly one reference capture")
 		assert.Equal(t, TagKindRef, tags[0].Kind, "Expected the capture to be recognized as a reference")
@@ -198,17 +219,17 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 	t.Run("NoReferencesFallback", func(t *testing.T) {
 		// This scenario has definitions but no references. We expect the fallback
 		// behavior to treat defines as references, effectively giving minimal ranking.
-		r := &RepoMap{}
+		r := &RepoCTX{}
 
 		allTags := []Tag{
 			{"FileA.go", "path/to/FileA.go", 10, "Foo", TagKindDef},
 			{"FileB.go", "path/to/FileB.go", 20, "Bar", TagKindDef},
 		}
 
-		mentionedFnames := map[string]bool{}
+		mentionedFilenames := map[string]bool{}
 		mentionedIdents := map[string]bool{}
 
-		ranked := r.getRankedTagsByPageRank(allTags, mentionedFnames, mentionedIdents)
+		ranked := r.getRankedTagsByPageRank(allTags, mentionedFilenames, mentionedIdents)
 
 		// In fallback mode, references=defines, so each file "references" itself.
 		// Because the Go code currently discards self-edges, you might end up with
@@ -229,7 +250,7 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 
 	t.Run("SingleRef", func(t *testing.T) {
 		// Scenario: FileA defines "Foo", FileB references "Foo" once.
-		r := &RepoMap{}
+		r := &RepoCTX{}
 
 		allTags := []Tag{
 			{"FileA.go", "path/to/FileA.go", 10, "Foo", TagKindDef},
@@ -237,10 +258,10 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 		}
 
 		// Nothing “mentioned” in chat
-		mentionedFnames := map[string]bool{}
+		mentionedFilenames := map[string]bool{}
 		mentionedIdents := map[string]bool{}
 
-		ranked := r.getRankedTagsByPageRank(allTags, mentionedFnames, mentionedIdents)
+		ranked := r.getRankedTagsByPageRank(allTags, mentionedFilenames, mentionedIdents)
 
 		// We expect the top-ranked definition to be (FileA, "Foo").
 		// Currently, the code will produce at least one ranked definition from FileA.
@@ -260,7 +281,7 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 		// Scenario: Two definitions of "Foo" in FileA and FileB.
 		// FileC references "Foo" once. "Foo" is also in mentionedIdents,
 		// so it should get a bigger weight.
-		r := &RepoMap{}
+		r := &RepoCTX{}
 
 		allTags := []Tag{
 			{"FileA.go", "path/to/FileA.go", 10, "Foo", TagKindDef},
@@ -268,7 +289,7 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 			{"FileC.go", "path/to/FileC.go", 30, "Foo", TagKindRef},
 		}
 
-		mentionedFnames := map[string]bool{
+		mentionedFilenames := map[string]bool{
 			// Suppose "path/to/FileC.go" is mentioned in chat
 			"path/to/FileC.go": true,
 		}
@@ -277,7 +298,7 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 			"Foo": true,
 		}
 
-		ranked := r.getRankedTagsByPageRank(allTags, mentionedFnames, mentionedIdents)
+		ranked := r.getRankedTagsByPageRank(allTags, mentionedFilenames, mentionedIdents)
 		if len(ranked) < 2 {
 			t.Errorf("Expected at least 2 ranked definitions, got %d", len(ranked))
 		}
@@ -314,11 +335,11 @@ func TestGetRankedTagsByPageRank(t *testing.T) {
 	})
 }
 
-// TestRenderTree tests the renderTree method of the RepoMap struct.
-// Now that renderTree takes (relFname, code []byte, linesOfInterest []int),
+// TestRenderTree tests the renderTree method of the RepoCTX struct.
+// Now that renderTree takes (relFilename, code []byte, linesOfInterest []int),
 //
-//	func (r *RepoMap) renderTree(
-//	    relFname string,
+//	func (r *RepoCTX) renderTree(
+//	    relFilename string,
 //	    code []byte,
 //	    linesOfInterest []int,
 //	) (string, error)
@@ -334,7 +355,7 @@ func Demo() {
 }
 `)
 
-	rm := NewRepoMap(".", nil)
+	rm := NewRepoCTX(".", nil, nil)
 
 	// If we want to see lines 2 and 3:
 	//   line 2 => "func Demo() {"

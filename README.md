@@ -46,6 +46,8 @@ See `cmd/main.go` for a working example.
 
 - cst caching
 - "chat files" to increase weight
+- GetRankedTagsMap `refresh` flag
+- support `maxToken`
 
 ## License
 

@@ -115,3 +115,38 @@ __pycache__/
 # Terraform cache
 .terraform/
 
+
+#################################
+# Databases                     #
+#################################
+*.db
+
+#################################
+# Images & Media                #
+#################################
+*.svg
+*.jpeg
+*.jpg
+*.png
+*.tiff
+*.bmp
+*.gif
+*.webp
+*.ico
+
+# Audio files
+*.mp3
+*.wav
+*.flac
+*.aac
+*.ogg
+*.m4a
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.wmv
+*.flv
+*.webm
