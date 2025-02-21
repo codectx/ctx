@@ -18,9 +18,10 @@ import (
 	_ "embed"
 
 	// Import the grep-ast library
-	queries "github.com/codectx/ctx/queries"
-	embed "github.com/codectx/ctx/services/embed"
-	store "github.com/codectx/ctx/services/store"
+	queries "github.com/codectx/ctx/internals/queries"
+	"github.com/codectx/ctx/internals/services/chunker"
+	embed "github.com/codectx/ctx/internals/services/embed"
+	store "github.com/codectx/ctx/internals/services/store"
 	goignore "github.com/cyber-nic/go-gitignore"
 	grepast "github.com/cyber-nic/grep-ast"
 	ollama "github.com/ollama/ollama/api"
@@ -87,9 +88,34 @@ const (
 // ModelStub simulates the main_model used in Python code (for token_count, etc.).
 type ModelStub struct{}
 
+// EmbeddingService defines an interface for obtaining embeddings from text.
+type EmbeddingService interface {
+	// Get generates an embedding for the given text.
+	Get(ctx context.Context, text []byte) ([]float32, embed.Meta, error)
+}
+
+type ChunkerService interface {
+	Chunk(tree *sitter.Tree, content []byte) ([]chunker.Chunk, error)
+}
+
+// StorageService defines the interface for CRUD operations on DuckDB.
+type StorageService interface {
+	// Upsert inserts or updates a row
+	Upsert(context.Context, string, string, []float32) error
+	// GetAll fetches all rows.
+	GetAll(ctx context.Context) (map[string]store.Embedding, error)
+	// Get fetches multiple rows by ids.
+	Get(ctx context.Context, id []string) ([]store.Embedding, error)
+	// MatchHash checks if the given hash matches the stored hash for the given id.
+	MatchHash(ctx context.Context, id, hash string) (bool, error)
+	// Delete removes a row by id.
+	Delete(ctx context.Context, id string) error
+}
+
 type RepoCTXServices struct {
-	Store store.StorageService
-	Embed embed.EmbeddingService
+	Chunk ChunkerService
+	Embed EmbeddingService
+	Store StorageService
 }
 
 // RepoCTX is the Go equivalent of the Python class `RepoCTX`.
@@ -130,7 +156,7 @@ func NewRepoCTX(root string, mainModel *ModelStub, database *sql.DB, options ...
 	zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 
 	// Setup storage service
-	db := store.NewStorageService(database)
+	db := store.New(database)
 
 	// tr@ck - pass ollama client as option WithEmbeddingClient()
 	os.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
@@ -141,7 +167,12 @@ func NewRepoCTX(root string, mainModel *ModelStub, database *sql.DB, options ...
 	}
 
 	// Create embedding service
-	emb := embed.NewEmbedService(oClient)
+	emb := embed.New(oClient)
+
+	chk := chunker.New(
+		chunker.WithMaxChunkSize(1024),
+		chunker.WithCoalesceThreshold(25),
+	)
 
 	rm := &RepoCTX{
 		commonIgnoreWords:    commonWords,
@@ -155,8 +186,9 @@ func NewRepoCTX(root string, mainModel *ModelStub, database *sql.DB, options ...
 		root:                 root,
 		verbose:              defaultVerbose,
 		svc: RepoCTXServices{
-			Store: db,
+			Chunk: chk,
 			Embed: emb,
+			Store: db,
 		},
 	}
 
@@ -494,24 +526,82 @@ func (r *RepoCTX) GetFileTagsRaw(f *FileCTX, filter TagFilter) ([]Tag, error) {
 	return tags, nil
 }
 
-// GetFileEmbedding embeds the source code of a file or retrieves it from the database.
-func (r *RepoCTX) GetFileEmbedding(ctx context.Context, f *FileCTX) ([]float32, error) {
-	// handle no embedding service
+// // GetFileEmbedding embeds the source code of a file or retrieves it from the database.
+// func (r *RepoCTX) GetFileEmbedding(ctx context.Context, f *FileCTX) ([]float32, error) {
+// 	// safety check: handle no embedding service
+// 	if r.svc.Embed == nil {
+// 		return nil, fmt.Errorf("no embedding service")
+// 	}
+
+// 	// handle no storage service: return fresh embedding
+// 	if r.svc.Store == nil {
+// 		vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to embed text: %w", err)
+// 		}
+// 		return vec, nil
+// 	}
+
+// 	// Determine if file has changed
+// 	match, err := r.svc.Store.MatchHash(ctx, f.Filename, f.MD5Hash)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to check hash: %w", err)
+// 	}
+
+// 	// If hash is the same, file has not changed
+// 	if match {
+// 		// get from db
+// 		b, err := r.svc.Store.Get(ctx, []string{f.Filename})
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to get embedding: %w", err)
+// 		}
+// 		// // Add to graph
+// 		// mu.Lock()
+// 		// g.Add(hnsw.MakeNode(path, b[0].Vector))
+// 		// mu.Unlock()
+
+// 		// // Skip
+// 		// d1, d2, _ := getDistance(q, b[0].Vector)
+// 		// l.Debug("match", "path", path, "d1", d1, "d2", d2)
+// 		return b[0].Vector, nil
+// 	}
+
+// 	// Embed
+// 	vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
+// 	// vec, meta, err := emb.Voyage(vKey, string(f))
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to embed text: %w", err)
+// 	}
+
+// 	// Upsert
+// 	if err := r.svc.Store.Upsert(ctx, f.Filename, f.MD5Hash, vec); err != nil {
+// 		return nil, fmt.Errorf("failed to upsert embedding: %w", err)
+// 	}
+
+// 	return vec, nil
+// }
+
+// GetEmbedding embeds the source code of content or retrieves it from the database.
+func (r *RepoCTX) GetEmbedding(ctx context.Context, key string, content []byte) ([]float32, error) {
+	// safety check: handle no embedding service
 	if r.svc.Embed == nil {
 		return nil, fmt.Errorf("no embedding service")
 	}
 
-	// handle no storage service
+	// handle no storage service: return fresh embedding
 	if r.svc.Store == nil {
-		vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
+		vec, _, err := r.svc.Embed.Get(ctx, content)
 		if err != nil {
 			return nil, fmt.Errorf("failed to embed text: %w", err)
 		}
 		return vec, nil
 	}
 
+	// compute hash
+	hash := computeHash(content)
+
 	// Determine if file has changed
-	match, err := r.svc.Store.MatchHash(ctx, f.Filename, f.MD5Hash)
+	match, err := r.svc.Store.MatchHash(ctx, key, hash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check hash: %w", err)
 	}
@@ -519,7 +609,7 @@ func (r *RepoCTX) GetFileEmbedding(ctx context.Context, f *FileCTX) ([]float32, 
 	// If hash is the same, file has not changed
 	if match {
 		// get from db
-		b, err := r.svc.Store.Get(ctx, []string{f.Filename})
+		b, err := r.svc.Store.Get(ctx, []string{key})
 		if err != nil {
 			return nil, fmt.Errorf("failed to get embedding: %w", err)
 		}
@@ -535,14 +625,15 @@ func (r *RepoCTX) GetFileEmbedding(ctx context.Context, f *FileCTX) ([]float32, 
 	}
 
 	// Embed
-	vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
+	vec, meta, err := r.svc.Embed.Get(ctx, content)
+	log.Debug().Int("duration", meta.Duration).Str("key", key).Int("tokens", meta.Tokens).Msg("embed")
 	// vec, meta, err := emb.Voyage(vKey, string(f))
 	if err != nil {
 		return nil, fmt.Errorf("failed to embed text: %w", err)
 	}
 
 	// Upsert
-	if err := r.svc.Store.Upsert(ctx, f.Filename, f.MD5Hash, vec); err != nil {
+	if err := r.svc.Store.Upsert(ctx, key, hash, vec); err != nil {
 		return nil, fmt.Errorf("failed to upsert embedding: %w", err)
 	}
 
@@ -627,7 +718,7 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 	go func() {
 		defer wg.Done()
 
-		_, err := r.GetFileEmbedding(ctx, f)
+		_, err := r.GetEmbedding(ctx, f.Filename, f.SourceCode)
 		if err != nil {
 			// log.Warn().Err(err).Msgf("Failed to get embeddings for %s", fname)
 			errChan <- fmt.Errorf("failed to get embeddings for %s: %w", fname, err)
@@ -645,6 +736,30 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 		// 	log.Warn().Err(err).Msgf("Failed to batch upsert embeddings for %s", fname)
 		// 	errChan <- err
 		// }
+	}()
+
+	// 8) Get file chunks
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		chunks, err := r.svc.Chunk.Chunk(f.Tree, f.SourceCode)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to chunk file: %w", err)
+			return
+		}
+
+		// Get embeddings for each chunk
+		for _, chunk := range chunks {
+			// composite key
+			key := fmt.Sprintf("%s:%d", f.Filename, chunk.Start)
+
+			// create chunk key: composite key of filename and chunk start
+			_, err := r.GetEmbedding(ctx, key, []byte(chunk.Text))
+			if err != nil {
+				log.Warn().Err(err).Msgf("Failed to get chunk embedding for %s", fname)
+			}
+		}
+
 	}()
 
 	// Wait for all goroutines to finish
@@ -706,7 +821,12 @@ func (r *RepoCTX) GetCTXFromFiles(ctx context.Context, allFilenames []string) []
 	}
 
 	for k, v := range embeddings {
-		log.Debug().Str("id", v.RunID.String()).Str("path", k).Str("hash", v.Hash).Float32("vector", v.Vector[0]).Msg("embed")
+		if r.verbose {
+			log.Trace().Str("hash", v.Hash).Str("id", v.RunID.String()).Str("path", k).Float32("vector", v.Vector[0]).Msg("embed")
+		} else {
+			log.Debug().Str("hash", v.Hash).Str("path", k).Float32("vector", v.Vector[0]).Msg("embed")
+		}
+
 	}
 
 	log.Info().Int("tags", len(allTags)).Int("embeddings", len(embeddings)).Msg("done")
@@ -1506,38 +1626,6 @@ func (r *RepoCTX) buildTree(path, prefix string) (string, []string) {
 
 	return treeBuilder.String(), filePaths
 }
-
-// // GetRepoFiles gathers all files in a directory (or the file itself).
-// func (r *RepoCTX) GetRepoFiles(path string) []string {
-// 	info, err := os.Stat(path)
-// 	if err != nil {
-// 		return []string{}
-// 	}
-
-// 	if !info.IsDir() {
-// 		return []string{path}
-// 	}
-
-// 	var srcFiles []string
-// 	filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
-// 		// Skip errors
-// 		if err != nil {
-// 			return nil
-// 		}
-// 		// Skip files that match the ignore patterns
-// 		if r.globIgnorePatterns.MatchesPath(p) {
-// 			return nil
-// 		}
-// 		if info.IsDir() {
-// 			return nil
-// 		}
-// 		log.Debug().Str("path", p).Msg("include")
-// 		srcFiles = append(srcFiles, p)
-// 		return nil
-// 	})
-
-// 	return srcFiles
-// }
 
 // FindGitRoot walks upward from the given path until
 // it finds a directory containing a ".git" folder.

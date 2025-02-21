@@ -32,13 +32,13 @@ const (
 	embeddingsRequestInputTypeDocument embeddingsRequestInputType = "document"
 )
 
-// EmbeddingService defines an interface for obtaining embeddings from text.
-type EmbeddingService interface {
-	// Get generates an embedding for the given text.
-	Get(ctx context.Context, text []byte) ([]float32, Meta, error)
-	// Get generates an embedding for the given text.
-	Voyage(key, value string) ([]float32, Meta, error)
-}
+// // EmbeddingService defines an interface for obtaining embeddings from text.
+// type EmbeddingService interface {
+// 	// Get generates an embedding for the given text.
+// 	Get(ctx context.Context, text []byte) ([]float32, Meta, error)
+// 	// Get generates an embedding for the given text.
+// 	Voyage(key, value string) ([]float32, Meta, error)
+// }
 
 // embeddingService implements EmbeddingService.
 type embeddingService struct {
@@ -46,14 +46,14 @@ type embeddingService struct {
 	client *ollama.Client
 }
 
-// NewEmbedService returns an EmbeddingService instance.
+// New returns an EmbeddingService instance.
 // You might inject additional dependencies (e.g., Voyage clients) as needed.
-func NewEmbedService(oClient *ollama.Client) EmbeddingService {
+func New(oClient *ollama.Client) embeddingService {
 	if oClient == nil {
 		panic("ollama client is not initialized")
 	}
 
-	return &embeddingService{
+	return embeddingService{
 		client: oClient,
 	}
 }
@@ -72,7 +72,7 @@ type Meta struct {
 
 // Get obtains an embedding using the Ollama client
 // In production, handle tokens, model name, error checking, etc.
-func (s *embeddingService) Get(ctx context.Context, value []byte) ([]float32, Meta, error) {
+func (s embeddingService) Get(ctx context.Context, value []byte) ([]float32, Meta, error) {
 	start := time.Now()
 	emb, err := s.client.Embed(ctx, &ollama.EmbedRequest{
 		Model: ollamaModelName,

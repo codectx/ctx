@@ -1,3 +1,4 @@
+// Package main provides the entry point for the codectx CLI.
 package main
 
 import (

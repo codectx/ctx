@@ -23,22 +23,6 @@ type Embedding struct {
 	RunID  uuid.UUID
 }
 
-// StorageService defines the interface for CRUD operations on DuckDB.
-type StorageService interface {
-	// Upsert inserts or updates a row
-	Upsert(context.Context, string, string, []float32) error
-	// // BatchUpsert inserts or updates one or more rows
-	// BatchUpsert(context.Context, string, string, map[string]Embedding) error
-	// GetAll fetches all rows.
-	GetAll(ctx context.Context) (map[string]Embedding, error)
-	// Get fetches multiple rows by ids.
-	Get(ctx context.Context, id []string) ([]Embedding, error)
-	// MatchHash checks if the given hash matches the stored hash for the given id.
-	MatchHash(ctx context.Context, id, hash string) (bool, error)
-	// Delete removes a row by id.
-	Delete(ctx context.Context, id string) error
-}
-
 // storageService implements StorageService.
 type storageService struct {
 	db    *sql.DB
@@ -46,9 +30,9 @@ type storageService struct {
 	// mu sync.Mutex
 }
 
-// NewStorageService opens or creates local.db and prepares the embeddings table.
+// New opens or creates local.db and prepares the embeddings table.
 // Panics on failure.
-func NewStorageService(db *sql.DB) StorageService {
+func New(db *sql.DB) storageService {
 
 	// Create table if it doesn't exist.
 	createTableSQL := `
@@ -67,11 +51,11 @@ func NewStorageService(db *sql.DB) StorageService {
 	// Generate a unique run ID.
 	runID, _ := uuid.NewV7()
 
-	return &storageService{db, runID}
+	return storageService{db, runID}
 }
 
 // Upsert inserts or updates a row.
-func (s *storageService) Upsert(ctx context.Context, id, hash string, vector []float32) error {
+func (s storageService) Upsert(ctx context.Context, id, hash string, vector []float32) error {
 	// Insert or update the row.
 	upsertSQL := `INSERT INTO embeddings (id, run_id, hash, embedding) VALUES (?, ?, ?, ?) 
 		ON CONFLICT(id) DO UPDATE SET hash = excluded.hash, run_id = excluded.run_id, embedding = excluded.embedding;`
@@ -87,7 +71,7 @@ func (s *storageService) Upsert(ctx context.Context, id, hash string, vector []f
 }
 
 // Get fetches multiple rows by ids.
-func (s *storageService) Get(ctx context.Context, id []string) ([]Embedding, error) {
+func (s storageService) Get(ctx context.Context, id []string) ([]Embedding, error) {
 	// build query with IN clause or do repeated SELECT.
 	if len(id) == 0 {
 		return nil, nil
@@ -134,7 +118,7 @@ func (s *storageService) Get(ctx context.Context, id []string) ([]Embedding, err
 }
 
 // Delete removes a row by key.
-func (s *storageService) Delete(ctx context.Context, id string) error {
+func (s storageService) Delete(ctx context.Context, id string) error {
 	// s.mu.Lock()
 	// defer s.mu.Unlock()
 
@@ -147,7 +131,7 @@ func (s *storageService) Delete(ctx context.Context, id string) error {
 
 // MatchHash checks if the given hash matches the stored hash for the given id.
 // Returns true if the hashes match, false if they don't, or an error.
-func (s *storageService) MatchHash(ctx context.Context, id, hash string) (bool, error) {
+func (s storageService) MatchHash(ctx context.Context, id, hash string) (bool, error) {
 	query := "SELECT COALESCE((SELECT CASE WHEN hash = ? THEN 1 ELSE 0 END FROM embeddings WHERE id = ?), 0);"
 
 	var match int
@@ -163,7 +147,7 @@ func (s *storageService) MatchHash(ctx context.Context, id, hash string) (bool, 
 }
 
 // GetAll fetches all rows from the embeddings table.
-func (s *storageService) GetAll(ctx context.Context) (map[string]Embedding, error) {
+func (s storageService) GetAll(ctx context.Context) (map[string]Embedding, error) {
 	// s.mu.Lock()
 	// defer s.mu.Unlock()
 

@@ -1,3 +1,4 @@
+// Package scm provides the internals for querying tree-sitter tags.
 package scm
 
 import (

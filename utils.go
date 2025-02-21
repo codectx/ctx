@@ -1,4 +1,3 @@
-// Package codectx contains the core logic for the ctx tool
 package codectx
 
 import (
