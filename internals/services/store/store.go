@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	// Import the DuckDB driver
@@ -70,6 +71,8 @@ func (s storageService) Upsert(ctx context.Context, id, hash string, vector []fl
 	return nil
 }
 
+var ErrNotFound = errors.New("record not found")
+
 // Get fetches multiple rows by ids.
 func (s storageService) Get(ctx context.Context, id []string) ([]Embedding, error) {
 	// build query with IN clause or do repeated SELECT.
@@ -113,6 +116,9 @@ func (s storageService) Get(ctx context.Context, id []string) ([]Embedding, erro
 	}
 	if rows.Err() != nil {
 		return nil, rows.Err()
+	}
+	if len(results) == 0 {
+		return nil, ErrNotFound
 	}
 	return results, nil
 }

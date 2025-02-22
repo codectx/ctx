@@ -32,18 +32,11 @@ const (
 	embeddingsRequestInputTypeDocument embeddingsRequestInputType = "document"
 )
 
-// // EmbeddingService defines an interface for obtaining embeddings from text.
-// type EmbeddingService interface {
-// 	// Get generates an embedding for the given text.
-// 	Get(ctx context.Context, text []byte) ([]float32, Meta, error)
-// 	// Get generates an embedding for the given text.
-// 	Voyage(key, value string) ([]float32, Meta, error)
-// }
-
 // embeddingService implements EmbeddingService.
 type embeddingService struct {
-	tk     *tokenizer.Tokenizer
-	client *ollama.Client
+	tk           *tokenizer.Tokenizer
+	client       *ollama.Client
+	providerName string
 }
 
 // New returns an EmbeddingService instance.
@@ -54,7 +47,8 @@ func New(oClient *ollama.Client) embeddingService {
 	}
 
 	return embeddingService{
-		client: oClient,
+		client:       oClient,
+		providerName: "ollama",
 	}
 }
 
@@ -62,17 +56,49 @@ func New(oClient *ollama.Client) embeddingService {
 type Meta struct {
 	// Tokens is the number of tokens in the input
 	Tokens int
-	// Duration is the duration in milliseconds
-	Duration int
+	// PerceivedDuration is the duration perceived by the client
+	PerceivedDuration time.Duration
+	// LoadDuration is the duration it took to load the model
+	LoadDuration time.Duration
+	// TotalDuration is the total duration it took to embed the input
+	TotalDuration time.Duration
 	// ProviderName is the name of the embedding provider
 	ProviderName string
 	// ProviderModel is the name of the embedding model
 	ProviderModel string
 }
 
+// GetBatch
+// GetBatch obtains embeddings for a batch of inputs using the Ollama client
+func (s embeddingService) GetBatch(ctx context.Context, values []string) ([][]float32, Meta, error) {
+	start := time.Now()
+
+	emb, err := s.client.Embed(ctx, &ollama.EmbedRequest{
+		Model: ollamaModelName,
+		Input: values,
+	})
+
+	if err != nil {
+		return nil, Meta{}, fmt.Errorf("failed to embed text: %w", err)
+	}
+
+	// fmt.Printf("PromptEvalCount: %d\n", emb.PromptEvalCount)
+
+	meta := Meta{
+		Tokens:            emb.PromptEvalCount,
+		LoadDuration:      emb.LoadDuration,
+		TotalDuration:     emb.TotalDuration,
+		PerceivedDuration: time.Since(start),
+		ProviderName:      s.providerName,
+		ProviderModel:     emb.Model,
+	}
+
+	return emb.Embeddings, meta, nil
+}
+
 // Get obtains an embedding using the Ollama client
 // In production, handle tokens, model name, error checking, etc.
-func (s embeddingService) Get(ctx context.Context, value []byte) ([]float32, Meta, error) {
+func (s embeddingService) Get(ctx context.Context, value string) ([]float32, Meta, error) {
 	start := time.Now()
 	emb, err := s.client.Embed(ctx, &ollama.EmbedRequest{
 		Model: ollamaModelName,
@@ -82,20 +108,22 @@ func (s embeddingService) Get(ctx context.Context, value []byte) ([]float32, Met
 	if err != nil {
 		return nil,
 			Meta{
-				Tokens:        0,
-				Duration:      int(time.Since(start).Milliseconds()),
-				ProviderName:  "ollama",
-				ProviderModel: ollamaModelName,
+				Tokens:            0,
+				PerceivedDuration: time.Since(start),
+				ProviderName:      s.providerName,
+				ProviderModel:     ollamaModelName,
 			},
 			fmt.Errorf("failed to embed text: %w", err)
 	}
 
 	return emb.Embeddings[0],
 		Meta{
-			Tokens:        emb.PromptEvalCount,
-			Duration:      int(time.Since(start).Milliseconds()),
-			ProviderName:  "ollama",
-			ProviderModel: ollamaModelName,
+			Tokens:            emb.PromptEvalCount,
+			LoadDuration:      emb.LoadDuration,
+			TotalDuration:     emb.TotalDuration,
+			PerceivedDuration: time.Since(start),
+			ProviderName:      s.providerName,
+			ProviderModel:     emb.Model,
 		}, nil
 }
 
@@ -144,10 +172,10 @@ func (s *embeddingService) Voyage(key, value string) ([]float32, Meta, error) {
 	}
 
 	return res.Data[0].Embedding, Meta{
-		Tokens:        res.Usage.TotalTokens,
-		ProviderName:  "voyageai",
-		ProviderModel: voyageModelName,
-		Duration:      int(time.Since(start).Milliseconds()),
+		Tokens:            res.Usage.TotalTokens,
+		ProviderName:      "voyageai",
+		ProviderModel:     voyageModelName,
+		PerceivedDuration: time.Since(start),
 	}, nil
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/codectx/ctx/internals/services/chunker"
 	embed "github.com/codectx/ctx/internals/services/embed"
 	store "github.com/codectx/ctx/internals/services/store"
+	"github.com/coder/hnsw"
 	goignore "github.com/cyber-nic/go-gitignore"
 	grepast "github.com/cyber-nic/grep-ast"
 	ollama "github.com/ollama/ollama/api"
@@ -71,11 +72,12 @@ type FileCTX struct {
 	// Source Code
 	SourceCode []byte
 	// Hash
-	MD5Hash string
+	// MD5Hash string
 }
 
 // RepoCTX default options
 const (
+	defaultGraphQueryResults    = 25
 	defaultGlobIgnoreEnabled    = true
 	globIgnoreFileDefault       = true
 	defaultMaxCtxFileMultiplier = 8
@@ -91,7 +93,9 @@ type ModelStub struct{}
 // EmbeddingService defines an interface for obtaining embeddings from text.
 type EmbeddingService interface {
 	// Get generates an embedding for the given text.
-	Get(ctx context.Context, text []byte) ([]float32, embed.Meta, error)
+	Get(ctx context.Context, text string) ([]float32, embed.Meta, error)
+	// GetBatch generates embeddings for the given texts.
+	GetBatch(ctx context.Context, text []string) ([][]float32, embed.Meta, error)
 }
 
 type ChunkerService interface {
@@ -106,8 +110,6 @@ type StorageService interface {
 	GetAll(ctx context.Context) (map[string]store.Embedding, error)
 	// Get fetches multiple rows by ids.
 	Get(ctx context.Context, id []string) ([]store.Embedding, error)
-	// MatchHash checks if the given hash matches the stored hash for the given id.
-	MatchHash(ctx context.Context, id, hash string) (bool, error)
 	// Delete removes a row by id.
 	Delete(ctx context.Context, id string) error
 }
@@ -125,6 +127,8 @@ type RepoCTX struct {
 	globIgnoreEnabled    bool
 	globIgnoreFilePath   string
 	globIgnorePatterns   *goignore.GitIgnore
+	graph                *hnsw.Graph[string]
+	graphQueryResults    int
 	lastMap              string
 	mainModel            *ModelStub
 	maxMapTokens         int
@@ -133,6 +137,7 @@ type RepoCTX struct {
 	totalProcessingTime  float64
 	contentPrefix        string
 	root                 string
+	ready                chan bool
 	svc                  RepoCTXServices
 	verbose              bool
 	// per-file map options
@@ -174,17 +179,22 @@ func NewRepoCTX(root string, mainModel *ModelStub, database *sql.DB, options ...
 		chunker.WithCoalesceThreshold(25),
 	)
 
+	ready := make(chan bool, 1)
+
 	rm := &RepoCTX{
 		commonIgnoreWords:    commonWords,
+		contentPrefix:        defaultRepoContentPrefix,
 		globIgnoreEnabled:    defaultGlobIgnoreEnabled,
 		globIgnorePatterns:   &goignore.GitIgnore{},
-		contentPrefix:        defaultRepoContentPrefix,
+		graph:                hnsw.NewGraph[string](),
+		graphQueryResults:    defaultGraphQueryResults,
 		mainModel:            mainModel,
 		maxMapTokens:         defaultMaxMapTokens,
 		maxCtxFileMultiplier: defaultMaxCtxFileMultiplier,
 		maxCtxWindow:         defaultMaxCtxWindow,
 		root:                 root,
 		verbose:              defaultVerbose,
+		ready:                ready,
 		svc: RepoCTXServices{
 			Chunk: chk,
 			Embed: emb,
@@ -361,6 +371,130 @@ func (r *RepoCTX) GetRelFilename(fname string) string {
 	return rel
 }
 
+func (r *RepoCTX) Query(ctx context.Context, query string) (string, error) {
+	// Get query embedding
+	q, _, err := r.svc.Embed.Get(ctx, query)
+	if err != nil {
+		return "", fmt.Errorf("failed to embed query: %w", err)
+	}
+
+	// Ensure repo is ready before querying
+	select {
+	case <-r.ready:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	// Compute distances and aggregate by file
+	type neighbor struct {
+		Filename string
+		Weight   float32
+	}
+	neighborsByWeight := make(map[string]float32)
+
+	neighbors := r.graph.Search(q, r.graphQueryResults)
+	for _, n := range neighbors {
+		distance := computeDistance(q, n.Value)
+		filename := strings.SplitN(n.Key, ":", 2)[0] // Get filename only
+
+		if existing, found := neighborsByWeight[filename]; !found || distance < existing {
+			neighborsByWeight[filename] = distance
+		}
+		// neighborsByWeight[filename] += distance
+		log.Debug().Float32("distance", distance).Str("file", filename).Msg("search result")
+	}
+
+	// Sort neighbors by weight (ascending)
+	results := make([]neighbor, 0, len(neighborsByWeight))
+	for filename, weight := range neighborsByWeight {
+		results = append(results, neighbor{filename, weight})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Weight < results[j].Weight
+	})
+
+	// Log top results
+	for _, res := range results {
+		log.Info().Float32("weight", res.Weight).Str("file", res.Filename).Msg("search ranking")
+	}
+
+	return "", nil
+
+	// // Compute distances and aggregate by file
+	// type neighbor struct {
+	// 	Filename string
+	// 	Weight   float32
+	// 	Count    int
+	// }
+	// neighborsByWeight := make(map[string]neighbor)
+
+	// // perform query
+	// neighbors := r.graph.Search(q, r.graphQueryResults)
+
+	// neighborsByDistance := make(map[float32]string)
+
+	// // sort neighbors by distance
+	// for _, n := range neighbors {
+	// 	distance := computeDistance(q, n.Value)
+	// 	neighborsByDistance[distance] = n.Key
+	// }
+
+	// // sort distances
+	// distances := make([]float32, 0, len(neighborsByDistance))
+	// for d := range neighborsByDistance {
+	// 	distances = append(distances, d)
+	// }
+	// sort.Slice(distances, func(i, j int) bool {
+	// 	return distances[i] < distances[j]
+	// })
+
+	// for _, distance := range distances {
+	// 	n := neighborsByDistance[distance]
+
+	// 	// distance := computeDistance(q, n.Value)
+	// 	filename := strings.SplitN(n, ":", 2)[0] // Get filename only
+
+	// 	// Apply moving average formula
+	// 	if existing, found := neighborsByWeight[filename]; found {
+	// 		newWeight := (existing.Weight*float32(existing.Count) + distance) / float32(existing.Count+1)
+	// 		neighborsByWeight[filename] = neighbor{filename, newWeight, existing.Count + 1}
+	// 	} else {
+	// 		neighborsByWeight[filename] = neighbor{filename, distance, 1}
+	// 	}
+
+	// 	log.Debug().Float32("distance", distance).Str("file", filename).Msg("search result")
+	// }
+
+	// // Sort neighbors by weight (ascending)
+	// results := make([]neighbor, 0, len(neighborsByWeight))
+	// for _, entry := range neighborsByWeight {
+	// 	results = append(results, entry)
+	// }
+	// sort.Slice(results, func(i, j int) bool {
+	// 	return results[i].Weight < results[j].Weight
+	// })
+
+	// // Log top results
+	// for _, res := range results {
+	// 	if res.Weight <= 0.8 {
+	// 		log.Info().Float32("weight", res.Weight).Str("file", res.Filename).Msg("search ranking")
+	// 	}
+	// }
+
+	// return "", nil
+}
+
+func computeDistance(q, v []float32) float32 {
+	// var sum float32
+	// for i := range q {
+	// 	sum += (q[i] - v[i]) * (q[i] - v[i])
+	// }
+	// return sum
+
+	return hnsw.CosineDistance(q, v)
+	// return hnsw.EuclideanDistance(q, v)
+}
+
 // TokenCount tries to mimic how the Python code estimates tokens (split into short vs. large).
 // tr@ck - this is a stub
 func (r *RepoCTX) TokenCount(text string) float64 {
@@ -526,63 +660,10 @@ func (r *RepoCTX) GetFileTagsRaw(f *FileCTX, filter TagFilter) ([]Tag, error) {
 	return tags, nil
 }
 
-// // GetFileEmbedding embeds the source code of a file or retrieves it from the database.
-// func (r *RepoCTX) GetFileEmbedding(ctx context.Context, f *FileCTX) ([]float32, error) {
-// 	// safety check: handle no embedding service
-// 	if r.svc.Embed == nil {
-// 		return nil, fmt.Errorf("no embedding service")
-// 	}
+var errStoreRequestFailed = errors.New("store request failed")
 
-// 	// handle no storage service: return fresh embedding
-// 	if r.svc.Store == nil {
-// 		vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("failed to embed text: %w", err)
-// 		}
-// 		return vec, nil
-// 	}
-
-// 	// Determine if file has changed
-// 	match, err := r.svc.Store.MatchHash(ctx, f.Filename, f.MD5Hash)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to check hash: %w", err)
-// 	}
-
-// 	// If hash is the same, file has not changed
-// 	if match {
-// 		// get from db
-// 		b, err := r.svc.Store.Get(ctx, []string{f.Filename})
-// 		if err != nil {
-// 			return nil, fmt.Errorf("failed to get embedding: %w", err)
-// 		}
-// 		// // Add to graph
-// 		// mu.Lock()
-// 		// g.Add(hnsw.MakeNode(path, b[0].Vector))
-// 		// mu.Unlock()
-
-// 		// // Skip
-// 		// d1, d2, _ := getDistance(q, b[0].Vector)
-// 		// l.Debug("match", "path", path, "d1", d1, "d2", d2)
-// 		return b[0].Vector, nil
-// 	}
-
-// 	// Embed
-// 	vec, _, err := r.svc.Embed.Get(ctx, f.SourceCode)
-// 	// vec, meta, err := emb.Voyage(vKey, string(f))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to embed text: %w", err)
-// 	}
-
-// 	// Upsert
-// 	if err := r.svc.Store.Upsert(ctx, f.Filename, f.MD5Hash, vec); err != nil {
-// 		return nil, fmt.Errorf("failed to upsert embedding: %w", err)
-// 	}
-
-// 	return vec, nil
-// }
-
-// GetEmbedding embeds the source code of content or retrieves it from the database.
-func (r *RepoCTX) GetEmbedding(ctx context.Context, key string, content []byte) ([]float32, error) {
+// GetBatchEmbedding embeds the source code of content of multiple files or retrieves them from the database.
+func (r *RepoCTX) GetBatchEmbedding(ctx context.Context, filename string, data map[string]string) (map[string][]float32, error) {
 	// safety check: handle no embedding service
 	if r.svc.Embed == nil {
 		return nil, fmt.Errorf("no embedding service")
@@ -590,54 +671,78 @@ func (r *RepoCTX) GetEmbedding(ctx context.Context, key string, content []byte) 
 
 	// handle no storage service: return fresh embedding
 	if r.svc.Store == nil {
-		vec, _, err := r.svc.Embed.Get(ctx, content)
+		return nil, fmt.Errorf("no storage service")
+	}
+
+	have := make(map[string][]float32, len(data))
+	wantKeys := []string{}
+	wantContents := []string{}
+	hashCache := make(map[string]string)
+
+	// begin by fetching embeddings from the database
+	// tr@ck -- optimize fetch all keys from db at once
+	for key, content := range data {
+		// compute hash
+		hash := computeHash([]byte(content))
+		hashCache[key] = hash
+
+		// get from db
+		b, _ := r.svc.Store.Get(ctx, []string{key})
+		if b != nil && len(b) > 0 {
+			if b[0].Hash == hash {
+				have[key] = b[0].Vector
+				continue
+			}
+		}
+
+		wantKeys = append(wantKeys, key)
+		wantContents = append(wantContents, content)
+
+		// unexpected error
+		if b != nil && len(b) == 0 {
+			return nil, fmt.Errorf("failed to get embedding: %w", errStoreRequestFailed)
+		}
+	}
+
+	log.Debug().Int("total", len(data)).Int("want", len(wantKeys)).Int("have", len(have)).Str("z", filename).Msg("chunks")
+
+	// Batch in 10s
+	batchSize := 10
+
+	for i := 0; i < len(wantKeys); i += batchSize {
+		end := i + batchSize
+		if end > len(wantKeys) {
+			end = len(wantKeys)
+		}
+
+		batchKeys := wantKeys[i:end]
+		batchContents := wantContents[i:end]
+
+		// Get all missing or stale embeddings
+		vec, meta, err := r.svc.Embed.GetBatch(ctx, batchContents)
+		log.Debug().Str("z", filename).Int("batch", len(batchKeys)).Int("tokens", meta.Tokens).Msg("batch")
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to embed text: %w", err)
 		}
-		return vec, nil
-	}
 
-	// compute hash
-	hash := computeHash(content)
-
-	// Determine if file has changed
-	match, err := r.svc.Store.MatchHash(ctx, key, hash)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check hash: %w", err)
-	}
-
-	// If hash is the same, file has not changed
-	if match {
-		// get from db
-		b, err := r.svc.Store.Get(ctx, []string{key})
-		if err != nil {
-			return nil, fmt.Errorf("failed to get embedding: %w", err)
+		// anxiety check
+		if len(vec) != len(batchContents) {
+			return nil, fmt.Errorf("failed to embed text: %w", err)
 		}
-		// // Add to graph
-		// mu.Lock()
-		// g.Add(hnsw.MakeNode(path, b[0].Vector))
-		// mu.Unlock()
 
-		// // Skip
-		// d1, d2, _ := getDistance(q, b[0].Vector)
-		// l.Debug("match", "path", path, "d1", d1, "d2", d2)
-		return b[0].Vector, nil
+		for idx, key := range batchKeys {
+			// add to have
+			have[key] = vec[idx]
+
+			// Upsert
+			if err := r.svc.Store.Upsert(ctx, key, hashCache[key], vec[idx]); err != nil {
+				return nil, fmt.Errorf("failed to upsert embedding: %w", err)
+			}
+		}
 	}
 
-	// Embed
-	vec, meta, err := r.svc.Embed.Get(ctx, content)
-	log.Debug().Int("duration", meta.Duration).Str("key", key).Int("tokens", meta.Tokens).Msg("embed")
-	// vec, meta, err := emb.Voyage(vKey, string(f))
-	if err != nil {
-		return nil, fmt.Errorf("failed to embed text: %w", err)
-	}
-
-	// Upsert
-	if err := r.svc.Store.Upsert(ctx, key, hash, vec); err != nil {
-		return nil, fmt.Errorf("failed to upsert embedding: %w", err)
-	}
-
-	return vec, nil
+	return have, nil
 }
 
 // GetFileTags calls GetTagsRaw and filters out short names and common words.
@@ -658,19 +763,19 @@ func (r *RepoCTX) GetFileTags(f *FileCTX, filter TagFilter) ([]Tag, error) {
 }
 
 // GetFileCTX collect tags and embeddings from a file
-func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter) ([]Tag, error) {
-	log.Trace().Str("file", fname).Msg("tags")
+func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter) (map[string][]float32, []Tag, error) {
+	log.Trace().Str("z", fname).Msg("tags")
 
 	// 1) Identify the file's language
 	lang, langID, err := grepast.GetLanguageFromFileName(fname)
 	if err != nil || lang == nil {
-		return nil, grepast.ErrorUnsupportedLanguage
+		return nil, nil, grepast.ErrorUnsupportedLanguage
 	}
 
 	// 2) Read source code
 	sourceCode, err := readSourceCode(fname)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read file (%s): %v", fname, err)
+		return nil, nil, fmt.Errorf("failed to read file (%s): %v", fname, err)
 	}
 
 	// 3) Create parser
@@ -680,11 +785,8 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 	// 4) Parse to CST
 	tree := parser.Parse(sourceCode, nil)
 	if tree == nil || tree.RootNode() == nil {
-		return nil, fmt.Errorf("failed to parse file: %s", fname)
+		return nil, nil, fmt.Errorf("failed to parse file: %s", fname)
 	}
-
-	// 5) Compute content hash
-	hash := computeHash(sourceCode)
 
 	// 5) Create FileCTX
 	f := &FileCTX{
@@ -694,12 +796,12 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 		LangID:      langID,
 		SourceCode:  sourceCode,
 		Tree:        tree,
-		MD5Hash:     hash,
 	}
 
 	errChan := make(chan error, 2)
 	wg := sync.WaitGroup{}
 	tags := []Tag{}
+	vecs := map[string][]float32{}
 
 	// 6) Get tags
 	wg.Add(1)
@@ -713,53 +815,30 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 		}
 	}()
 
-	// 7) Get file embeddings
+	// 8) Get file chunk embeddings
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 
-		_, err := r.GetEmbedding(ctx, f.Filename, f.SourceCode)
-		if err != nil {
-			// log.Warn().Err(err).Msgf("Failed to get embeddings for %s", fname)
-			errChan <- fmt.Errorf("failed to get embeddings for %s: %w", fname, err)
-			return
-		}
-
-		// v, err = r.GetFileEmbeddings(ctx, f)
-		// if err != nil {
-		// 	log.Warn().Err(err).Msgf("Failed to get embeddings for %s", fname)
-		// 	errChan <- err
-		// }
-
-		// // Upsert
-		// if err := r.svc.Store.BatchUpsert(ctx, fname, hash, v); err != nil {
-		// 	log.Warn().Err(err).Msgf("Failed to batch upsert embeddings for %s", fname)
-		// 	errChan <- err
-		// }
-	}()
-
-	// 8) Get file chunks
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+		// Chunk file
 		chunks, err := r.svc.Chunk.Chunk(f.Tree, f.SourceCode)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to chunk file: %w", err)
 			return
 		}
 
-		// Get embeddings for each chunk
+		// Prepare data for embeddings
+		data := make(map[string]string, len(chunks))
 		for _, chunk := range chunks {
-			// composite key
-			key := fmt.Sprintf("%s:%d", f.Filename, chunk.Start)
-
-			// create chunk key: composite key of filename and chunk start
-			_, err := r.GetEmbedding(ctx, key, []byte(chunk.Text))
-			if err != nil {
-				log.Warn().Err(err).Msgf("Failed to get chunk embedding for %s", fname)
-			}
+			data[fmt.Sprintf("%s:%d", f.Filename, chunk.Start)] = chunk.Text
 		}
+		log.Trace().Str("z", f.Filename).Int("chunks", len(chunks)).Msgf("Chunk")
 
+		// Get embeddings for each chunk
+		vecs, err = r.GetBatchEmbedding(ctx, f.Filename, data)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get chunk embeddings for %s: %w", fname, err)
+		}
 	}()
 
 	// Wait for all goroutines to finish
@@ -768,20 +847,19 @@ func (r *RepoCTX) GetFileCTX(ctx context.Context, fname string, filter TagFilter
 	// Check for errors
 	select {
 	case err := <-errChan:
-		return nil, err
+		return nil, nil, err
 	default:
 	}
 
-	return tags, nil
+	return vecs, tags, nil
 }
 
 // GetCTXFromFiles collect all tags from those files
 func (r *RepoCTX) GetCTXFromFiles(ctx context.Context, allFilenames []string) []Tag {
-
 	var allTags []Tag
+	var mu sync.Mutex
 
 	// Filter out short names and common words
-	// tr@ck - where is the right place to define this filter?
 	tagFilter := func(name string) bool {
 		if len(name) <= 2 {
 			return false
@@ -792,44 +870,73 @@ func (r *RepoCTX) GetCTXFromFiles(ctx context.Context, allFilenames []string) []
 		return true
 	}
 
-	for _, fname := range allFilenames {
-		tags, err := r.GetFileCTX(ctx, fname, tagFilter)
-		if err != nil {
-			if err == grepast.ErrorUnsupportedLanguage {
-				log.Trace().Msgf("skip %s", fname)
+	type fileCTXResult struct {
+		tags []Tag
+		vecs map[string][]float32
+	}
+
+	// Create a worker pool with a maximum of 4 workers
+	const maxWorkers = 4
+	fileChan := make(chan string, len(allFilenames))
+	resChan := make(chan fileCTXResult, len(allFilenames))
+	errChan := make(chan error, len(allFilenames))
+
+	var wg sync.WaitGroup
+
+	// Worker function
+	worker := func() {
+		defer wg.Done()
+		for fname := range fileChan {
+			vecs, tags, err := r.GetFileCTX(ctx, fname, tagFilter)
+			if err != nil {
+				if err == grepast.ErrorUnsupportedLanguage {
+					log.Trace().Msgf("skip %s", fname)
+					continue
+				}
+				log.Error().Err(err).Msgf("Error getting tags for file: %s", fname)
+				errChan <- err
 				continue
 			}
-			log.Error().Err(err).Msgf("Error getting tags for file: %s", fname)
-			continue
-		}
 
-		// tr@ck - file tags
-		// fmt.Println("Tags for file:", fname)
-		// for _, t := range tg {
-		// 	fmt.Printf("- %s / %d / %s\n", t.Kind, t.Line, t.Name)
-		// }
-
-		if tags != nil {
-			allTags = append(allTags, tags...)
+			resChan <- fileCTXResult{tags: tags, vecs: vecs}
 		}
 	}
 
-	// fetch all tags
-	embeddings, err := r.svc.Store.GetAll(ctx)
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to get all embeddings")
+	// Start workers
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go worker()
 	}
 
-	for k, v := range embeddings {
-		if r.verbose {
-			log.Trace().Str("hash", v.Hash).Str("id", v.RunID.String()).Str("path", k).Float32("vector", v.Vector[0]).Msg("embed")
-		} else {
-			log.Debug().Str("hash", v.Hash).Str("path", k).Float32("vector", v.Vector[0]).Msg("embed")
+	// Send filenames to the file channel
+	go func() {
+		for _, fname := range allFilenames {
+			fileChan <- fname
 		}
+		close(fileChan)
+	}()
 
+	// Wait for all workers to finish
+	go func() {
+		wg.Wait()
+		close(resChan)
+		close(errChan)
+	}()
+
+	// Collect results
+	for res := range resChan {
+		mu.Lock()
+		allTags = append(allTags, res.tags...)
+		for k, v := range res.vecs {
+			r.graph.Add(hnsw.MakeNode(k, v))
+		}
+		mu.Unlock()
 	}
 
-	log.Info().Int("tags", len(allTags)).Int("embeddings", len(embeddings)).Msg("done")
+	// Handle errors if needed
+	for err := range errChan {
+		log.Error().Err(err).Msg("Error processing files")
+	}
 
 	return allTags
 }
@@ -1318,6 +1425,9 @@ func (r *RepoCTX) Generate(
 		repoContent = strings.ReplaceAll(r.contentPrefix, "{other}", other)
 	}
 
+	// ready for querying
+	r.ready <- true
+
 	repoContent += treeMap
 	return repoContent
 }
@@ -1381,7 +1491,7 @@ func (r *RepoCTX) toTree(tags []Tag, chatFilenames []string) string {
 
 	// tr@ck - verbose
 	for i, c := range chatFilenames {
-		log.Trace().Int("index", i).Str("file", c).Msg("chat files")
+		log.Trace().Int("index", i).Str("z", c).Msg("chat files")
 	}
 
 	//  2) Sort the tags first by FileName in ascending order, and then by Line in ascending order
@@ -1412,7 +1522,7 @@ func (r *RepoCTX) toTree(tags []Tag, chatFilenames []string) string {
 	// 5) Process tags in a streaming fashion, flushing out each file's lines-of-interest
 	//    when we detect a "new file name" or the dummy tag.
 	for i, t := range tags {
-		log.Trace().Int("index", i).Str("file", t.FileName).Int("line", t.Line).Str("tag", t.Name).Msg("tags")
+		log.Trace().Int("index", i).Str("z", t.FileName).Int("line", t.Line).Str("tag", t.Name).Msg("tags")
 
 		relFilename := t.FileName
 		// // Skip tags that belong to a “chat” file. (Python: if this_rel_fname in chat_rel_fnames: continue)

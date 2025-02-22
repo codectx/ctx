@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
@@ -70,8 +71,6 @@ func main() {
 
 	allFiles, treeMap := rm.GetRepoFiles(absPath)
 
-	fmt.Println(treeMap)
-
 	// chatSet := make(map[string]bool)
 	// for _, cf := range chatFiles {
 	// 	chatSet[filepath.Clean(cf)] = true
@@ -96,20 +95,87 @@ func main() {
 	mentionedFnames := map[string]bool{}
 	mentionedIdents := map[string]bool{}
 
-	codeMap := rm.Generate(
-		ctx,
-		allFiles,
-		otherFiles,
-		mentionedFnames,
-		mentionedIdents,
-	)
+	var codeMap string
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		codeMap = rm.Generate(
+			ctx,
+			allFiles,
+			otherFiles,
+			mentionedFnames,
+			mentionedIdents,
+		)
+	}()
+
+	query, err := getUserQuery(os.Args)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	<-done
+
+	// Search
+	q, err := rm.Query(ctx, query)
+	// q, _, err := emb.Voyage(vKey, query)
+	if err != nil {
+		log.Err(err).Msg("Failed to embed query")
+		return
+	}
+
+	// tr@ck - flag to print the tree map
+	fmt.Println(treeMap)
 
 	if codeMap == "" {
 		fmt.Println("Empty Code Map")
 		return
 	}
 
+	// tr@ck - flag to print the code map
 	fmt.Println(codeMap)
+
+	fmt.Printf("Query Results: %s\n", q)
+}
+
+// getUserQuery returns the query
+func getUserQuery(args []string) (string, error) {
+
+	const usage = "Usage: <optional:query>"
+
+	if len(args) < 1 || len(args) > 2 {
+		return "", fmt.Errorf(usage)
+	}
+
+	query := ""
+
+	if len(args) == 2 {
+		query = args[2]
+	} else {
+		var err error
+		query, err = promptForUserQuery()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	if query == "" {
+		return "", fmt.Errorf(usage)
+	}
+
+	return query, nil
+}
+
+// promptForUserQuery prompts the user to input a search query
+func promptForUserQuery() (string, error) {
+	fmt.Printf("Query: ")
+	q, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
+	return q, nil
 }
 
 // ConfigLogging configures the logging level and format

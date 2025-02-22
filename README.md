@@ -52,3 +52,7 @@ See `cmd/main.go` for a working example.
 ## License
 
 [MIT License](LICENSE.md)
+
+# debugging
+
+https://arrow.apache.org/install/
